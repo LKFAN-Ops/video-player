@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('api', {
   openSubtitle: () => ipcRenderer.invoke('openSubtitle'),
   readTextFile: (p) => ipcRenderer.invoke('readTextFile', p),
   saveTextFile: (opts) => ipcRenderer.invoke('saveTextFile', opts),
+  loadSubCache: (videoPath) => ipcRenderer.invoke('loadSubCache', videoPath),
+  saveSubCache: (videoPath, data) => ipcRenderer.invoke('saveSubCache', { videoPath, data }),
   generateSubtitles: (opts) => ipcRenderer.invoke('generateSubtitles', opts),
   transcribeSegment: (opts) => ipcRenderer.invoke('transcribeSegment', opts),
   diagnoseEnv: () => ipcRenderer.invoke('diagnoseEnv'),

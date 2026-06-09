@@ -72,13 +72,25 @@ def load_model(model_path, device):
 
 
 def build_text_mask(strip_bgr, bright_thr, dilate_px):
-    """在字幕带内生成文字 mask：高亮度（白/黄字）+ 膨胀覆盖描边/抗锯齿。返回 {0,1} uint8 HxW。"""
+    """字幕带内生成文字 mask：亮字核心 + 紧贴的暗色描边 + 闭运算 + 膨胀。
+    关键：字幕通常是「亮字 + 深色描边/阴影」，只抓亮像素会把描边和抗锯齿过渡留下，
+    补全后就成了「字残影」。这里把描边也并入 mask，并放大覆盖范围。返回 {0,1} uint8 HxW。"""
     gray = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2GRAY)
-    _, m = cv2.threshold(gray, bright_thr, 1, cv2.THRESH_BINARY)
+    # 1) 亮字核心（白/黄字）
+    _, bright = cv2.threshold(gray, bright_thr, 255, cv2.THRESH_BINARY)
+    if int(bright.sum()) == 0:
+        return np.zeros(gray.shape, np.uint8)
+    # 2) 暗描边：取较暗像素，但仅保留紧贴亮字（亮字膨胀邻域内）的部分，避免误吞背景
+    _, dark = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+    near = cv2.dilate(bright, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)))
+    outline = cv2.bitwise_and(dark, near)
+    m = cv2.bitwise_or(bright, outline)
+    # 3) 闭运算：填补字内孔洞、连接断裂笔画，避免局部漏掉
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    # 4) 膨胀：盖住描边外缘与抗锯齿过渡带（残影的主要来源）
     if dilate_px > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px))
-        m = cv2.dilate(m, k, iterations=1)
-    return m.astype(np.uint8)
+        m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px)))
+    return (m > 0).astype(np.uint8)
 
 
 def get_ref_index(neighbor_ids, length):
@@ -132,7 +144,7 @@ def main():
     ap.add_argument("--region", help="x,y,w,h 像素，优先于 region_norm")
     ap.add_argument("--mask_mode", default="auto", choices=["auto", "box"])
     ap.add_argument("--bright_thr", type=int, default=190)
-    ap.add_argument("--dilate_px", type=int, default=7)
+    ap.add_argument("--dilate_px", type=int, default=11, help="文字 mask 膨胀像素，越大越能盖住描边/残影")
     ap.add_argument("--clip_len", type=int, default=50)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--ffmpeg", default="ffmpeg")
@@ -140,6 +152,7 @@ def main():
     ap.add_argument("--encoder", default="auto", help="auto|nvenc|x264 视频编码器")
     ap.add_argument("--no_fp16", action="store_true", help="关闭半精度推理")
     ap.add_argument("--no_skip", action="store_true", help="不跳过无字幕片段（每帧都跑 STTN）")
+    ap.add_argument("--no_temporal_union", action="store_true", help="关闭整段时序并集 mask（默认开启，用于消除残影）")
     args = ap.parse_args()
 
     device = args.device
@@ -233,23 +246,30 @@ def main():
 
     def process_clip(clip_bgr):
         nonlocal done
-        # 抽 strip，生成文字 mask，缩放到模型尺寸
-        frames_model_rgb, masks_model, full_masks = [], [], []
+        sh, sw = y1 - y0, x1 - x0
+
+        # 1) 逐帧文字 mask（全分辨率 strip 上）
+        full_masks = []
         for fr in clip_bgr:
             strip = fr[y0:y1, x0:x1]
             if args.mask_mode == "box":
-                fm = np.ones(strip.shape[:2], np.uint8)
+                fm = np.ones((sh, sw), np.uint8)
             else:
                 fm = build_text_mask(strip, args.bright_thr, args.dilate_px)
             full_masks.append(fm)
-            strip_rgb = cv2.cvtColor(cv2.resize(strip, (MODEL_W, MODEL_H)), cv2.COLOR_BGR2RGB)
-            m_small = cv2.resize(fm, (MODEL_W, MODEL_H), interpolation=cv2.INTER_NEAREST)
-            frames_model_rgb.append(strip_rgb)
-            masks_model.append((m_small > 0).astype(np.uint8))
 
-        # 跳过无字幕片段：整段检测不到亮文字 -> 不跑 STTN，直接原样透传（大幅提速）
+        # 2) 时序并集：字幕在一小段内基本静止，但逐帧阈值会让描边/抗锯齿像素时有时无，
+        #    导致补全不彻底、残留字影。把整段 mask 取并集，得到一致且完整的去除区域，
+        #    是消除「字残影」的关键。（STTN 会用相邻/参考帧把背景补回，多盖一点也安全。）
+        if args.mask_mode != "box" and not args.no_temporal_union:
+            union = full_masks[0].copy()
+            for fm in full_masks[1:]:
+                np.maximum(union, fm, out=union)
+            full_masks = [union] * len(full_masks)
+
+        # 跳过无字幕片段：整段检测不到文字 -> 不跑 STTN，直接原样透传（大幅提速）
         if args.mask_mode != "box" and not args.no_skip:
-            if sum(int(m.sum()) for m in masks_model) == 0:
+            if int(full_masks[0].sum()) == 0:
                 for fr in clip_bgr:
                     write_frame(fr)
                     done += 1
@@ -257,18 +277,30 @@ def main():
                         progress(done, total)
                 return
 
+        # 3) 缩放到模型尺寸
+        frames_model_rgb, masks_model = [], []
+        for i, fr in enumerate(clip_bgr):
+            strip = fr[y0:y1, x0:x1]
+            strip_rgb = cv2.cvtColor(cv2.resize(strip, (MODEL_W, MODEL_H)), cv2.COLOR_BGR2RGB)
+            m_small = cv2.resize(full_masks[i], (MODEL_W, MODEL_H), interpolation=cv2.INTER_NEAREST)
+            frames_model_rgb.append(strip_rgb)
+            masks_model.append((m_small > 0).astype(np.uint8))
+
         comp = inpaint_clip(model, frames_model_rgb, masks_model, device, fp16=not args.no_fp16)
-        # 回贴：模型结果缩放回 strip 尺寸，仅替换全分辨率文字像素
-        sh, sw = y1 - y0, x1 - x0
+
+        # 4) 回贴：模型结果缩放回 strip 尺寸，用「羽化 alpha」混合，
+        #    避免补全区与原图之间出现硬边/接缝，过渡更自然。
         for i, fr in enumerate(clip_bgr):
             comp_bgr = cv2.cvtColor(cv2.resize(comp[i], (sw, sh)), cv2.COLOR_RGB2BGR)
-            fm = full_masks[i]
-            if args.mask_mode != "box":
-                fm3 = fm[:, :, None]
-                orig = fr[y0:y1, x0:x1]
-                fr[y0:y1, x0:x1] = comp_bgr * fm3 + orig * (1 - fm3)
-            else:
+            if args.mask_mode == "box":
                 fr[y0:y1, x0:x1] = comp_bgr
+            else:
+                # 二值 mask 高斯模糊 -> [0,1] alpha，边缘平滑过渡
+                alpha = cv2.GaussianBlur(full_masks[i].astype(np.float32), (0, 0), sigmaX=1.5)
+                alpha = np.clip(alpha, 0.0, 1.0)[:, :, None]
+                orig = fr[y0:y1, x0:x1].astype(np.float32)
+                blended = comp_bgr.astype(np.float32) * alpha + orig * (1.0 - alpha)
+                fr[y0:y1, x0:x1] = blended.astype(np.uint8)
             write_frame(fr)
             done += 1
             if done % 10 == 0 or done == total:

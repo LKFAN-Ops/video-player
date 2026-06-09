@@ -48,6 +48,8 @@
     realtimeProcessed: new Set(),
     realtimeInflight: 0,
     realtimeMaxParallel: 2,           // 并发上限：Whisper base 单线程跑得动 2 路
+    totalSegs: 0,                     // 整片总段数（按 segSec 切分），用于后台铺底预转写
+    sweepCursor: 0,                   // 铺底扫描指针：从头到尾补齐未处理段
     translateInflight: false,
     lastTranslateAt: 0,
     // 去原片硬字幕：on 开关 + 归一化矩形（相对视频画面内容区，0~1）
@@ -232,6 +234,7 @@
     if (zhOut && zhOut.length) state.zh = window.SRT.sortAndDedupe(state.zh.concat(zhOut))
     if (ruOut && ruOut.length) state.ru = window.SRT.sortAndDedupe(state.ru.concat(ruOut))
     renderOverlay()
+    scheduleCacheSave()           // 译文落盘，二次打开零延迟
   }
 
   // 在视频播放过程中，对当前位置附近尚未翻译的原文进行补翻
@@ -277,7 +280,9 @@
     return null
   }
 
-  // ---------- 实时字幕 ----------
+  // ---------- 自动字幕（后台整片预转写 + 落盘缓存） ----------
+  // 思路：勾选后不仅识别播放位置附近，还在后台从头到尾铺底转写整片并缓存。
+  // 已处理区域跳转即毫秒级（只是查表）；同一视频二次打开直接读缓存，全程零延迟。
   function startRealtime() {
     if (!state.videoPath) {
       setStatus('请先打开视频')
@@ -285,12 +290,13 @@
       return
     }
     state.realtime = true
-    state.realtimeProcessed.clear()
     state.realtimeInflight = 0
-    setStatus('实时识别已开启')
+    state.sweepCursor = 0
+    // 不清空 src：缓存或已识别的内容要保留；据此重建"已处理段"集合
+    rebuildProcessedFromSrc()
+    setStatus('自动字幕已开启（后台转写整片）')
 
     if (state.realtimeTimer) clearInterval(state.realtimeTimer)
-    // 200ms 一拍，比之前的 1s 灵敏 5 倍
     state.realtimeTimer = setInterval(realtimeTick, 200)
     realtimeTick()
   }
@@ -299,33 +305,104 @@
     state.realtime = false
     if (state.realtimeTimer) clearInterval(state.realtimeTimer)
     state.realtimeTimer = null
-    state.realtimeProcessed.clear()
     state.realtimeInflight = 0
     setStatus('')
+  }
+
+  // 根据已有 state.src 重建"已处理段"集合（缓存命中或断点续跑时避免重复识别）
+  function rebuildProcessedFromSrc() {
+    state.realtimeProcessed.clear()
+    for (const it of state.src) {
+      const idx = Math.floor(window.SRT.toSeconds(it.start) / state.realtimeSegSec)
+      if (idx >= 0) state.realtimeProcessed.add(idx)
+    }
+  }
+
+  // 后台缓存写入（防抖，避免频繁 IO）
+  let cacheSaveTimer = null
+  function scheduleCacheSave() {
+    if (!state.videoPath) return
+    clearTimeout(cacheSaveTimer)
+    cacheSaveTimer = setTimeout(() => {
+      const p = state.videoPath
+      if (!p) return
+      window.api.saveSubCache(p, { src: state.src, zh: state.zh, ru: state.ru }).catch(() => {})
+    }, 2500)
+  }
+
+  // 打开视频时尝试读取缓存，命中则直接显示（零延迟）
+  async function tryLoadCache(p) {
+    const cached = await window.api.loadSubCache(p)
+    if (!cached || !Array.isArray(cached.src) || !cached.src.length) return false
+    if (state.videoPath !== p) return false   // 期间已切换视频，丢弃
+    state.src = window.SRT.sortAndDedupe(cached.src)
+    state.zh  = Array.isArray(cached.zh) ? window.SRT.sortAndDedupe(cached.zh) : []
+    state.ru  = Array.isArray(cached.ru) ? window.SRT.sortAndDedupe(cached.ru) : []
+    if (state.realtime) rebuildProcessedFromSrc()
+    renderOverlay()
+    setStatus('已从缓存载入字幕（跳转零延迟）')
+    return true
+  }
+
+  // 后台预转写进度提示
+  function updatePretranscribeStatus() {
+    if (!state.realtime || !state.totalSegs) return
+    let done = 0
+    for (let i = 0; i < state.totalSegs; i++) if (state.realtimeProcessed.has(i)) done++
+    if (done >= state.totalSegs) setStatus('字幕已就绪（全片已缓存，可任意跳转）')
+    else setStatus(`后台转写字幕 ${done}/${state.totalSegs} (${Math.floor(done * 100 / state.totalSegs)}%)`)
+  }
+
+  // 发起一段转写。priority=true 时绕过并发上限插队——用于快进/拖动后立即识别当前段，
+  // 不让它排在跳转前预取的旧任务后面。返回是否真正发起。
+  function kickSegment(idx, priority = false) {
+    if (idx < 0) return false
+    if (state.realtimeProcessed.has(idx)) return false
+    if (!priority && state.realtimeInflight >= state.realtimeMaxParallel) return false
+    state.realtimeProcessed.add(idx)
+    state.realtimeInflight++
+    transcribeAndAppend(idx, priority).catch(e => {
+      console.error('实时字幕段失败：', e)
+      state.realtimeProcessed.delete(idx)   // 允许下轮重试
+    }).finally(() => {
+      state.realtimeInflight = Math.max(0, state.realtimeInflight - 1)
+    })
+    return true
   }
 
   function realtimeTick() {
     if (!state.realtime || !state.videoPath) return
     const cur = videoEl.currentTime || 0
     const segIdx = Math.floor(cur / state.realtimeSegSec)
-    // 当前段 + 未来 N 段，尽量预拉取
-    for (let i = 0; i <= state.realtimeLookaheadSegs; i++) {
-      if (state.realtimeInflight >= state.realtimeMaxParallel) return
-      const idx = segIdx + i
-      if (idx < 0) continue
-      if (state.realtimeProcessed.has(idx)) continue
-      state.realtimeProcessed.add(idx)
-      state.realtimeInflight++
-      transcribeAndAppend(idx).catch(e => {
-        console.error('实时字幕段失败：', e)
-        state.realtimeProcessed.delete(idx)   // 允许下轮重试
-      }).finally(() => {
-        state.realtimeInflight = Math.max(0, state.realtimeInflight - 1)
-      })
+    // 1) 优先：当前段 + 未来 N 段（保证正在看的位置最先有字幕）
+    for (let i = 0; i <= state.realtimeLookaheadSegs && state.realtimeInflight < state.realtimeMaxParallel; i++) {
+      kickSegment(segIdx + i, false)
     }
+    // 2) 铺底：用空闲并发槽从头到尾补齐整片未处理段（后台预转写）
+    if (state.totalSegs > 0) {
+      while (state.realtimeInflight < state.realtimeMaxParallel) {
+        while (state.sweepCursor < state.totalSegs && state.realtimeProcessed.has(state.sweepCursor)) state.sweepCursor++
+        if (state.sweepCursor >= state.totalSegs) break
+        if (!kickSegment(state.sweepCursor, false)) break
+      }
+    }
+    updatePretranscribeStatus()
   }
 
-  async function transcribeAndAppend(idx) {
+  // 快进/拖动结束后调用：当前段优先插队，立即识别，消除跳转后的字幕滞后
+  function realtimeSeekKick() {
+    if (!state.realtime || !state.videoPath) return
+    const cur = videoEl.currentTime || 0
+    const segIdx = Math.floor(cur / state.realtimeSegSec)
+    // 跳转目标已识别过则无需重跑（如往回拖到看过的位置）——直接渲染即可
+    if (!state.realtimeProcessed.has(segIdx)) {
+      setStatus('正在识别跳转位置…')
+      kickSegment(segIdx, true)          // 绕过并发上限，立刻开跑
+    }
+    realtimeTick()                        // 顺带补预取后续段
+  }
+
+  async function transcribeAndAppend(idx, priority = false) {
     const startSec = Math.max(0, idx * state.realtimeSegSec - (idx > 0 ? state.realtimeOverlapSec : 0))
     const dur = state.realtimeSegSec + (idx > 0 ? state.realtimeOverlapSec : 0)
     const seg = await window.api.transcribeSegment({
@@ -340,10 +417,12 @@
       return
     }
     const items = window.SRT.parse(seg.srt)
-    if (!items.length) return
+    if (!items.length) { if (priority) setStatus(''); return }
     const offsetItems = window.SRT.offset(items, startSec)
     state.src = window.SRT.sortAndDedupe(state.src.concat(offsetItems))
     renderOverlay()
+    scheduleCacheSave()           // 原文落盘
+    if (priority) setStatus('')   // 跳转位置已识别，清掉"识别中"提示
     // 翻译（异步，不阻塞下一段拉取）
     ensureTranslations(offsetItems, ['zh', 'ru']).catch(() => {})
   }
@@ -353,7 +432,10 @@
     if (rawModeChk.checked) applyRawMode()
     else applyFitMode()
     positionMask()
-    setStatus('')
+    // 整片总段数（用于后台铺底预转写进度与扫描边界）
+    const dur = videoEl.duration || 0
+    state.totalSegs = dur ? Math.ceil(dur / state.realtimeSegSec) : 0
+    if (!state.realtime) setStatus('')
   })
   window.addEventListener('resize', () => { if (state.deSub) positionMask() })
   videoEl.addEventListener('error', () => {
@@ -364,7 +446,10 @@
     renderOverlay()
     ensureNearby(videoEl.currentTime || 0).catch(() => {})
   })
-  videoEl.addEventListener('seeked', renderOverlay)
+  videoEl.addEventListener('seeked', () => {
+    renderOverlay()
+    realtimeSeekKick()   // 快进/拖动后立即优先识别当前位置
+  })
   videoEl.addEventListener('play',   renderOverlay)
   videoEl.addEventListener('pause',  renderOverlay)
 
@@ -372,12 +457,18 @@
   function loadVideoFromPath(p) {
     state.videoPath = p
     state.src = []; state.zh = []; state.ru = []
+    state.totalSegs = 0; state.sweepCursor = 0
     overlayEl.textContent = ''
     stopRealtime()
     realtimeChk.checked = false
+    playerEl.classList.add('has-video')
     videoEl.pause()
     videoEl.src = toFileUrl(p)
     videoEl.load()
+    // 命中缓存则直接显示字幕（跳转零延迟）；勾选自动字幕可继续补全未缓存部分
+    tryLoadCache(p).then(hit => {
+      if (hit && state.videoPath === p) realtimeChk.checked = false
+    }).catch(() => {})
   }
 
   openVideoBtn.addEventListener('click', async () => {

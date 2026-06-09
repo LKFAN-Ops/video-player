@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
 const { spawn } = require('child_process')
 const os = require('os')
 let ffmpegPath = null
@@ -173,6 +174,35 @@ ipcMain.handle('saveTextFile', async (evt, { defaultPath, data }) => {
 ipcMain.handle('readTextFile', async (evt, filePath) => {
   const data = await fs.promises.readFile(filePath, 'utf-8')
   return data
+})
+
+// =============== 字幕缓存（整片预转写结果落盘，二次打开零延迟） ===============
+function subCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'subcache')
+  try { fs.mkdirSync(dir, { recursive: true }) } catch (_) {}
+  return dir
+}
+function subCacheFile(videoPath) {
+  const h = crypto.createHash('md5').update(String(videoPath)).digest('hex')
+  return path.join(subCacheDir(), h + '.json')
+}
+ipcMain.handle('loadSubCache', async (evt, videoPath) => {
+  try {
+    const raw = await fs.promises.readFile(subCacheFile(videoPath), 'utf-8')
+    const obj = JSON.parse(raw)
+    // 用文件大小校验：视频被替换/重新编码后缓存自动失效
+    const st = await fs.promises.stat(videoPath)
+    if (obj.meta && Number(obj.meta.size) !== Number(st.size)) return null
+    return obj
+  } catch (_) { return null }
+})
+ipcMain.handle('saveSubCache', async (evt, { videoPath, data }) => {
+  try {
+    const st = await fs.promises.stat(videoPath)
+    const obj = { meta: { size: st.size, mtimeMs: st.mtimeMs, savedAt: Date.now() }, ...data }
+    await fs.promises.writeFile(subCacheFile(videoPath), JSON.stringify(obj), 'utf-8')
+    return true
+  } catch (_) { return false }
 })
 
 ipcMain.handle('exportVideo', async (evt, { inputPath, subtitlePath, outputPath, removeRegion }) => {
