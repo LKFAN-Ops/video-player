@@ -100,6 +100,9 @@ python scripts/download_models.py
 > 默认下载实时翻译模型 `m2m100_418M` + `faster-whisper-small/medium`，并可选 `m2m100_1.2B`。
 > Downloads `m2m100_418M` (real-time) + `faster-whisper-small/medium`, optionally `m2m100_1.2B`.
 
+> 💡 **去字幕(GPU)** 用的 STTN 权重（约 66MB）**无需手动下载**：首次点击「去字幕(GPU)」时会自动从 GitHub 直连拉取到 `models_cache/sttn/sttn.pth`（免代理）。
+> The STTN weights (~66MB) for **GPU subtitle removal** download automatically on first use — no manual step needed.
+
 ### 4. 启动 / Start
 
 ```bash
