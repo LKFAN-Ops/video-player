@@ -3,6 +3,28 @@
 > 一个带「实时中俄字幕」的本地视频播放器 —— 离线、免代理、开箱即用。
 > A local video player with **real-time Chinese / Russian subtitles** — offline, no proxy, ready to use.
 
+<p align="center">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-blue">
+  <img alt="Electron" src="https://img.shields.io/badge/Electron-29-47848F?logo=electron&logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.8+-3776AB?logo=python&logoColor=white">
+  <img alt="Status" src="https://img.shields.io/badge/status-side%20project%20·%20WIP-orange">
+</p>
+
+## 这是什么？/ TL;DR
+
+**打开本地视频 → 自动把里面的话识别成文字 → 实时翻译成中文或俄文字幕。** 全程在你自己电脑上完成，不开代理、不上传视频、不花钱。
+
+**Open a local video → it transcribes the speech → and shows real-time Chinese/Russian subtitles.** Everything runs on your own machine — no VPN, nothing uploaded, free.
+
+```
+🎞️ 视频音频 ──► 🗣️ faster-whisper ──► 📝 原文文本 ──► 🌏 M2M100 ──► 💬 中/俄字幕
+   audio          speech-to-text         text          translate       subtitles
+```
+
+> 适合：看没有中俄字幕的片源、外语学习、给家人朋友配字幕。
+> Good for: foreign videos without CN/RU subtitles, language learning, captioning for friends & family.
+
 ---
 
 ## 缘起 / Why this exists
