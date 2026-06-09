@@ -1,0 +1,14 @@
+# Python 依赖 / Python dependencies
+# 建议 Python 3.8+ / Python 3.8+ recommended
+#
+# 注意：若 torch < 2.6，加载 .bin 权重会被安全策略拒绝（CVE-2025-32434），
+# 因此请使用 safetensors 权重（download_models.py 会自动转换）。
+# Note: with torch < 2.6, loading .bin weights is blocked (CVE-2025-32434),
+# so safetensors weights are used (download_models.py converts automatically).
+
+torch>=2.2
+transformers>=4.40
+faster-whisper>=1.0
+sentencepiece>=0.1.99
+safetensors>=0.4
+huggingface_hub>=0.23

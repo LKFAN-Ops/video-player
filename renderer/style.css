@@ -1,0 +1,79 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  background: #0c0c0c;
+  color: #e7e7e7;
+}
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
+}
+.bar button,
+.bar select {
+  background: #2a2a2a;
+  color: #eee;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.bar button:hover,
+.bar select:hover { background: #353535; }
+.bar .chk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+#status {
+  margin-left: auto;
+  color: #9aa0a6;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.player {
+  height: calc(100% - 48px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  position: relative;
+  overflow: auto;
+}
+
+#video        { background: #000; max-width: 100%; max-height: 100%; }
+#video.fit    { width: 100%; height: auto; max-height: calc(100vh - 60px); }
+#video.raw    { width: auto; height: auto; }
+
+/* 字幕叠加层 —— 永远在视频之上，pointer-events:none 避免遮挡播放控件 */
+#overlay {
+  position: absolute;
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%);
+  z-index: 10;
+  pointer-events: none;
+  color: #ffffff;
+  font-size: 22px;
+  line-height: 1.35;
+  text-align: center;
+  white-space: pre-wrap;
+  max-width: 90%;
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+#overlay:empty {
+  background: transparent;
+  padding: 0;
+}

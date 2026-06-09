@@ -1,0 +1,35 @@
+# ===== 依赖与构建产物 / dependencies & build output =====
+node_modules/
+dist/
+build/
+
+# ===== 模型缓存（数 GB，切勿提交）/ model cache (several GB, never commit) =====
+models_cache/
+.cache/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 运行时 / 调试临时文件 / runtime & debug scratch =====
+mt_err*.txt
+mt_out*.txt
+mt_test_*.txt
+*.bak
+*.log
+seg_*.wav
+
+# ===== 与本项目无关的遗留文件 / unrelated leftover =====
+xgboost_sniper_brain.json
+
+# ===== 编辑器 / 系统 / editor & OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ===== Claude Code 本地配置 / local agent config =====
+.claude/

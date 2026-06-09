@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>双语字幕播放器</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="bar">
+    <button id="openVideo">打开视频</button>
+    <button id="openSubtitle">加载字幕</button>
+
+    <select id="genLang" title="生成字幕时使用的源语言">
+      <option value="auto">自动识别</option>
+      <option value="en">英语</option>
+      <option value="zh">中文</option>
+      <option value="ru">俄语</option>
+    </select>
+    <button id="generate">生成字幕</button>
+
+    <label class="chk"><input type="checkbox" id="realtimeToggle" /> 实时字幕</label>
+
+    <select id="displayLang" title="字幕显示模式">
+      <option value="src">原文</option>
+      <option value="zh">中文</option>
+      <option value="ru">俄语</option>
+      <option value="zh-ru" selected>双语 (中/俄)</option>
+    </select>
+
+    <label class="chk"><input type="checkbox" id="rawModeToggle" /> 原画模式</label>
+
+    <button id="toZh">翻译为中文</button>
+    <button id="toRu">翻译为俄语</button>
+    <button id="saveSrt">保存字幕</button>
+    <button id="exportVideo">导出视频</button>
+
+    <span id="status"></span>
+  </div>
+
+  <div class="player">
+    <video id="video" controls></video>
+    <div id="overlay" aria-live="polite"></div>
+  </div>
+
+  <script src="./srt.js"></script>
+  <script src="./translate.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>
