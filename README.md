@@ -25,6 +25,14 @@
 > 适合：看没有中俄字幕的片源、外语学习、给家人朋友配字幕。
 > Good for: foreign videos without CN/RU subtitles, language learning, captioning for friends & family.
 
+## 📸 截图 / Screenshot
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="实时中俄双语字幕 / real-time bilingual CN-RU subtitles" width="720">
+</p>
+
+<p align="center"><sub>播放时实时叠加中文 + 俄文双语字幕 · real-time Chinese + Russian subtitles overlaid during playback</sub></p>
+
 ---
 
 ## 缘起 / Why this exists
