@@ -175,7 +175,7 @@ ipcMain.handle('readTextFile', async (evt, filePath) => {
   return data
 })
 
-ipcMain.handle('exportVideo', async (evt, { inputPath, subtitlePath, outputPath }) => {
+ipcMain.handle('exportVideo', async (evt, { inputPath, subtitlePath, outputPath, removeRegion }) => {
   try {
     // 检查FFmpeg是否可用
     const ffCmd = ffmpegPath || 'ffmpeg'
@@ -190,15 +190,30 @@ ipcMain.handle('exportVideo', async (evt, { inputPath, subtitlePath, outputPath 
       return { success: false, error: 'ffmpeg_not_found' }
     }
     
-    // 使用FFmpeg合并视频和字幕，确保使用正确的编码参数
-    // Windows 下字幕滤镜需把反斜杠 / 冒号转义，否则会被解析器吃掉
-    const escSub = String(subtitlePath)
-      .replace(/\\/g, '/')
-      .replace(/:/g, '\\:')
-      .replace(/'/g, "\\'")
-    const args = [
-      '-i', inputPath,          // 输入视频
-      '-vf', `subtitles='${escSub}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=20'`,
+    // 构建 -vf 滤镜链：先用 delogo 去除原片硬字幕（像素插值，真去除），再烧录双语字幕
+    const filters = []
+
+    // 去原片硬字幕：removeRegion 为视频原始帧的整数像素矩形 {x,y,w,h}
+    if (removeRegion && [removeRegion.x, removeRegion.y, removeRegion.w, removeRegion.h].every(n => Number.isFinite(n) && n >= 0)) {
+      const x = Math.max(1, Math.round(removeRegion.x))
+      const y = Math.max(1, Math.round(removeRegion.y))
+      const w = Math.max(1, Math.round(removeRegion.w))
+      const h = Math.max(1, Math.round(removeRegion.h))
+      filters.push(`delogo=x=${x}:y=${y}:w=${w}:h=${h}`)
+    }
+
+    // 烧录字幕（可选）。Windows 下字幕滤镜需把反斜杠 / 冒号转义，否则会被解析器吃掉
+    if (subtitlePath) {
+      const escSub = String(subtitlePath)
+        .replace(/\\/g, '/')
+        .replace(/:/g, '\\:')
+        .replace(/'/g, "\\'")
+      filters.push(`subtitles='${escSub}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=20'`)
+    }
+
+    const args = ['-i', inputPath]
+    if (filters.length) args.push('-vf', filters.join(','))
+    args.push(
       '-c:v', 'libx264',        // 视频编码器
       '-crf', '23',             // 视频质量，范围0-51，23为默认
       '-preset', 'medium',      // 编码速度预设
@@ -206,7 +221,7 @@ ipcMain.handle('exportVideo', async (evt, { inputPath, subtitlePath, outputPath 
       '-b:a', '128k',           // 音频比特率
       '-y',                     // 覆盖输出文件
       outputPath                // 输出文件路径
-    ]
+    )
     
     console.log('FFmpeg命令:', ffCmd, args)
     
@@ -270,7 +285,9 @@ ipcMain.handle('generateSubtitles', async (evt, { inputPath, lang }) => {
   const run = async () => {
     const fw = await detectFasterWhisper()
     if (!fw) return { path: null, need: 'whisper' }
-    const args = [path.join(resolveScriptsDir(), 'transcribe.py'), '--input', inputPath, '--output_dir', outDir, '--model', 'base', '--device', 'cpu', '--compute_type', 'int8']
+    // 整片转写：模型可用 WHISPER_MODEL 覆盖（small/medium 更准）；transcribe.py 内部用批量推理加速、且会按 small→base→tiny 回退
+    const fullModel = process.env.WHISPER_MODEL || 'base'
+    const args = [path.join(resolveScriptsDir(), 'transcribe.py'), '--input', inputPath, '--output_dir', outDir, '--model', fullModel, '--device', 'cpu', '--compute_type', 'int8']
     if (lang && lang !== 'auto') args.push('--language', lang)
     const ok = await new Promise((resolve) => {
       const pyArgs = args
@@ -293,6 +310,62 @@ ipcMain.handle('generateSubtitles', async (evt, { inputPath, lang }) => {
   const promise = run()
   const result = await promise
   return result
+})
+
+// 商业级硬字幕去除（STTN，GPU）：调用 scripts/desub_sttn.py，进度经 'desubProgress' 推给渲染层
+ipcMain.handle('removeHardSubs', async (evt, { inputPath, outputPath, region, maskMode, device }) => {
+  const fw = await detectFasterWhisper()
+  if (!fw) return { success: false, error: 'no_python' }
+  const ffCmd = ffmpegPath || 'ffmpeg'
+  const scriptsDir = resolveScriptsDir()
+  const modelPath = path.join(resolveHfHome(), 'sttn', 'sttn.pth')
+
+  const args = [
+    ...(fw.prefix || []),
+    path.join(scriptsDir, 'desub_sttn.py'),
+    '--input', inputPath,
+    '--output', outputPath,
+    '--model', modelPath,
+    '--region', `${region.x},${region.y},${region.w},${region.h}`,
+    '--mask_mode', maskMode || 'auto',
+    '--device', device || 'cuda',
+    '--ffmpeg', ffCmd
+  ]
+
+  console.log('[desub] 启动:', fw.cmd, args.join(' '))
+  return await new Promise((resolve) => {
+    const p = spawn(fw.cmd, args, { env: pythonEnv() })
+    let stderrTail = ''
+    let lastErr = null
+    const onLine = (line) => {
+      const m = line.match(/^PROGRESS\s+(\d+)\s+(\d+)/)
+      if (m) {
+        try { evt.sender.send('desubProgress', { done: +m[1], total: +m[2] }) } catch {}
+      }
+    }
+    let outBuf = ''
+    p.stdout.on('data', (d) => {
+      outBuf += d.toString()
+      let i
+      while ((i = outBuf.indexOf('\n')) >= 0) {
+        onLine(outBuf.slice(0, i).trim())
+        outBuf = outBuf.slice(i + 1)
+      }
+    })
+    p.stderr.on('data', (d) => {
+      const s = d.toString()
+      stderrTail = (stderrTail + s).slice(-2000)
+      if (s.includes('ERR:')) lastErr = s.trim()
+      console.error('[desub-err]:', s.trim())
+    })
+    p.on('error', () => resolve({ success: false, error: 'spawn_failed' }))
+    p.on('exit', (code) => {
+      if (code === 0) resolve({ success: true, outputPath })
+      else resolve({ success: false, error: lastErr || 'desub_failed', details: stderrTail })
+    })
+    // 长视频可能很久，给 4 小时上限
+    setTimeout(() => { try { p.kill() } catch {}; resolve({ success: false, error: 'timeout' }) }, 4 * 60 * 60 * 1000)
+  })
 })
 
 ipcMain.handle('diagnoseEnv', async () => {
@@ -586,7 +659,7 @@ async function startTranscribeService() {
   const args = [
     path.join(scriptsDir, 'whisper_server.py'),
     '--port', String(whisperPort),
-    '--model', 'small',          // 精度优先；缺失时服务自动回退到 base/tiny
+    '--model', process.env.WHISPER_MODEL || 'small',  // 精度优先；可用 WHISPER_MODEL 覆盖；缺失时服务自动回退到 base/tiny
     '--device', 'cpu',
     '--compute_type', 'int8'
   ]

@@ -10,6 +10,13 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
+# 共享术语表 / CPU 线程配置（可选；缺失时优雅降级）
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import term_utils
+except Exception:  # noqa: BLE001
+    term_utils = None
+
 
 _model = None
 _loaded_name = None
@@ -41,10 +48,27 @@ def items_to_srt(items):
     return '\n'.join(lines)
 
 
+def _cpu_threads():
+    if term_utils:
+        try:
+            return term_utils.cpu_threads()
+        except Exception:  # noqa: BLE001
+            pass
+    n = os.cpu_count() or 4
+    return max(1, min(8, n // 2 if n > 4 else n))
+
+
 def _try_load(name: str, device: str, compute_type: str, local_only: bool):
     from faster_whisper import WhisperModel
-    print(f"[whisper] 尝试加载模型: {name} (device={device}, compute_type={compute_type}, local_only={local_only})", flush=True)
-    return WhisperModel(name, device=device, compute_type=compute_type, local_files_only=local_only)
+    threads = _cpu_threads()
+    # cpu_threads: 充分利用多核加快推理；num_workers: 允许并发请求并行解码
+    workers = int(os.environ.get("WHISPER_NUM_WORKERS", "1") or "1")
+    print(f"[whisper] 尝试加载模型: {name} (device={device}, compute_type={compute_type}, "
+          f"cpu_threads={threads}, num_workers={workers}, local_only={local_only})", flush=True)
+    return WhisperModel(
+        name, device=device, compute_type=compute_type,
+        local_files_only=local_only, cpu_threads=threads, num_workers=workers,
+    )
 
 
 def load_model_background(name: str, device: str, compute_type: str):
@@ -85,14 +109,28 @@ def wait_for_model(timeout=120):
     return False
 
 
-def transcribe(audio_path: str, language: str = None):
+def transcribe(audio_path: str, language: str = None, hotwords: str = None,
+               initial_prompt: str = None):
     if not wait_for_model(timeout=120):
         raise RuntimeError(f"模型未就绪: {_load_error or '未知错误'}")
     model = _model
     if model is None:
         raise RuntimeError(f"模型加载失败: {_load_error or '未知错误'}")
     lang = None if (not language or language == 'auto') else language
-    # 实时优先：beam=1 (3-4× 速度，精度损失轻微)，保留 VAD 与上下文
+
+    # 专有名词偏置：术语表 hotwords + 本次请求附带的 hotwords
+    hw = None
+    if term_utils:
+        try:
+            hw = term_utils.hotwords_string(hotwords)
+        except Exception:  # noqa: BLE001
+            hw = hotwords
+    else:
+        hw = hotwords
+    hw = hw or None
+
+    # 实时优先：beam=1（速度快）。但加入 temperature 回退链——遇到口音/嘈杂片段时
+    # 自动升温重试，显著降低重复/幻觉，几乎不增加正常片段的耗时。
     segments, info = model.transcribe(
         audio_path,
         language=lang,
@@ -101,9 +139,13 @@ def transcribe(audio_path: str, language: str = None):
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=400),
         condition_on_previous_text=True,
-        temperature=0.0,
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
         no_speech_threshold=0.6,
+        hallucination_silence_threshold=2.0,
+        hotwords=hw,
+        initial_prompt=initial_prompt or None,
         word_timestamps=False,
     )
     items = []
@@ -147,7 +189,11 @@ class Handler(BaseHTTPRequestHandler):
             if not audio_path or not os.path.exists(audio_path):
                 return self._send_json(400, {'ok': False, 'error': 'invalid_input'})
             language = req.get('language')
-            items = transcribe(audio_path, language)
+            items = transcribe(
+                audio_path, language,
+                hotwords=req.get('hotwords'),
+                initial_prompt=req.get('initial_prompt'),
+            )
             srt = items_to_srt(items)
             self._send_json(200, {'ok': True, 'items': items, 'srt': srt})
         except Exception as e:
@@ -163,10 +209,12 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--port', type=int, default=8001)
-    # 默认使用 base：体积适中、识别质量稳定，且用户机器上已完整缓存
-    p.add_argument('--model', default='base', help='tiny/base/small/medium')
+    # 默认使用 base：体积适中、识别质量稳定，且用户机器上已完整缓存。
+    # 可用环境变量 WHISPER_MODEL / WHISPER_COMPUTE 覆盖（如 small / medium、int8_float32）。
+    p.add_argument('--model', default=os.environ.get('WHISPER_MODEL', 'base'),
+                   help='tiny/base/small/medium')
     p.add_argument('--device', default='cpu')
-    p.add_argument('--compute_type', default='int8')
+    p.add_argument('--compute_type', default=os.environ.get('WHISPER_COMPUTE', 'int8'))
     args = p.parse_args()
 
     os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')

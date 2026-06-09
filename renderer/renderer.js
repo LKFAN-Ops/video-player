@@ -20,10 +20,14 @@
   const realtimeChk   = $('realtimeToggle')
   const displayLangSel= $('displayLang')
   const rawModeChk    = $('rawModeToggle')
+  const deSubChk      = $('deSubToggle')
+  const subMaskEl     = $('subMask')
+  const maskHandleEl  = subMaskEl ? subMaskEl.querySelector('.mask-handle') : null
   const toZhBtn       = $('toZh')
   const toRuBtn       = $('toRu')
   const saveSrtBtn    = $('saveSrt')
   const exportVideoBtn= $('exportVideo')
+  const removeHardSubBtn = $('removeHardSub')
 
   if (!videoEl || !overlayEl) {
     console.error('缺少关键 DOM 元素，脚本中止')
@@ -45,7 +49,10 @@
     realtimeInflight: 0,
     realtimeMaxParallel: 2,           // 并发上限：Whisper base 单线程跑得动 2 路
     translateInflight: false,
-    lastTranslateAt: 0
+    lastTranslateAt: 0,
+    // 去原片硬字幕：on 开关 + 归一化矩形（相对视频画面内容区，0~1）
+    deSub: false,
+    maskRect: { x: 0.06, y: 0.80, w: 0.88, h: 0.16 }  // 默认底部字幕条
   }
 
   // 默认双语显示
@@ -74,6 +81,110 @@
       videoEl.style.width  = videoEl.videoWidth + 'px'
       videoEl.style.height = videoEl.videoHeight + 'px'
     }
+  }
+
+  // ---------- 去原片硬字幕：遮罩 ----------
+  // 计算视频画面在播放器内实际显示的内容矩形（处理黑边/letterbox），坐标相对 .player
+  function videoContentRect() {
+    const pr = playerEl.getBoundingClientRect()
+    const vr = videoEl.getBoundingClientRect()
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight
+    // 元素相对 player 的位置
+    let left = vr.left - pr.left, top = vr.top - pr.top
+    let width = vr.width, height = vr.height
+    if (vw && vh && width && height) {
+      const scale = Math.min(width / vw, height / vh)
+      const cw = vw * scale, ch = vh * scale
+      left += (width - cw) / 2
+      top  += (height - ch) / 2
+      width = cw; height = ch
+    }
+    return { left, top, width, height }
+  }
+
+  function positionMask() {
+    if (!subMaskEl || !state.deSub) return
+    const c = videoContentRect()
+    const r = state.maskRect
+    subMaskEl.style.left   = (c.left + r.x * c.width) + 'px'
+    subMaskEl.style.top    = (c.top  + r.y * c.height) + 'px'
+    subMaskEl.style.width  = Math.max(8, r.w * c.width) + 'px'
+    subMaskEl.style.height = Math.max(8, r.h * c.height) + 'px'
+  }
+
+  function showMask(on) {
+    state.deSub = !!on
+    if (!subMaskEl) return
+    subMaskEl.style.display = on ? 'block' : 'none'
+    if (on) positionMask()
+  }
+
+  // 拖动 / 缩放遮罩框，结果写回归一化 maskRect
+  function initMaskInteractions() {
+    if (!subMaskEl) return
+    let mode = null            // 'move' | 'resize'
+    let startX = 0, startY = 0
+    let orig = null            // 起始像素矩形
+
+    const onMove = (e) => {
+      if (!mode) return
+      const c = videoContentRect()
+      const dx = e.clientX - startX
+      const dy = e.clientY - startY
+      let left = orig.left, top = orig.top, w = orig.width, h = orig.height
+      if (mode === 'move') { left += dx; top += dy }
+      else { w = Math.max(12, orig.width + dx); h = Math.max(12, orig.height + dy) }
+      // 限制在内容区内
+      left = Math.min(Math.max(left, c.left), c.left + c.width - w)
+      top  = Math.min(Math.max(top,  c.top),  c.top  + c.height - h)
+      w = Math.min(w, c.left + c.width - left)
+      h = Math.min(h, c.top  + c.height - top)
+      state.maskRect = {
+        x: (left - c.left) / c.width,
+        y: (top  - c.top)  / c.height,
+        w: w / c.width,
+        h: h / c.height
+      }
+      positionMask()
+      e.preventDefault()
+    }
+    const onUp = () => {
+      mode = null
+      subMaskEl.classList.remove('editing')
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    const begin = (m, e) => {
+      mode = m
+      startX = e.clientX; startY = e.clientY
+      const r = subMaskEl.getBoundingClientRect()
+      const pr = playerEl.getBoundingClientRect()
+      orig = { left: r.left - pr.left, top: r.top - pr.top, width: r.width, height: r.height }
+      subMaskEl.classList.add('editing')
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+      e.preventDefault(); e.stopPropagation()
+    }
+    subMaskEl.addEventListener('mousedown', (e) => begin('move', e))
+    if (maskHandleEl) maskHandleEl.addEventListener('mousedown', (e) => begin('resize', e))
+  }
+
+  // 供导出使用：把归一化矩形换算为视频原始帧的整数像素矩形
+  function maskPixelRegion() {
+    if (!state.deSub) return null
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight
+    if (!vw || !vh) return null
+    const r = state.maskRect
+    let x = Math.round(r.x * vw)
+    let y = Math.round(r.y * vh)
+    let w = Math.round(r.w * vw)
+    let h = Math.round(r.h * vh)
+    // delogo 要求矩形完全在帧内且与边缘留 1px
+    x = Math.min(Math.max(1, x), vw - 2)
+    y = Math.min(Math.max(1, y), vh - 2)
+    w = Math.max(1, Math.min(w, vw - x - 1))
+    h = Math.max(1, Math.min(h, vh - y - 1))
+    return { x, y, w, h }
   }
 
   // ---------- 字幕渲染 ----------
@@ -241,8 +352,10 @@
   videoEl.addEventListener('loadedmetadata', () => {
     if (rawModeChk.checked) applyRawMode()
     else applyFitMode()
+    positionMask()
     setStatus('')
   })
+  window.addEventListener('resize', () => { if (state.deSub) positionMask() })
   videoEl.addEventListener('error', () => {
     const code = videoEl.error ? videoEl.error.code : '?'
     setStatus(`视频加载失败 (code ${code})`)
@@ -389,39 +502,94 @@
   // ---------- 导出带字幕视频 ----------
   exportVideoBtn.addEventListener('click', async () => {
     if (!state.videoPath) { setStatus('请先打开视频'); return }
-    if (!state.src.length) { setStatus('请先加载或生成字幕'); return }
+    const removeRegion = maskPixelRegion()   // 去原片字幕开启时返回像素矩形，否则 null
+    // 没有字幕时，只有在「去原片字幕」开启时才允许导出（纯去字幕）
+    if (!state.src.length && !removeRegion) { setStatus('请先加载或生成字幕'); return }
 
-    if (!state.zh.length || !state.ru.length) {
-      setStatus('正在补全双语翻译…')
-      const need = []
-      if (!state.zh.length) need.push('zh')
-      if (!state.ru.length) need.push('ru')
-      await ensureTranslations(state.src, need)
+    let tempPath = null
+    if (state.src.length) {
+      if (!state.zh.length || !state.ru.length) {
+        setStatus('正在补全双语翻译…')
+        const need = []
+        if (!state.zh.length) need.push('zh')
+        if (!state.ru.length) need.push('ru')
+        await ensureTranslations(state.src, need)
+      }
+      const merged = mergeBilingual()
+      if (merged.length) {
+        const tempName = 'bilingual_subtitles.srt'
+        const tempData = window.SRT.stringify(merged)
+        tempPath = await window.api.saveTextFile({ defaultPath: tempName, data: tempData })
+        if (!tempPath) { setStatus('已取消'); return }
+      }
     }
 
-    const merged = mergeBilingual()
-    if (!merged.length) { setStatus('无法生成双语字幕'); return }
-
-    const tempName = 'bilingual_subtitles.srt'
-    const tempData = window.SRT.stringify(merged)
-    const tempPath = await window.api.saveTextFile({ defaultPath: tempName, data: tempData })
-    if (!tempPath) { setStatus('已取消'); return }
-
     const baseName = state.videoPath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '')
+    const suffix = removeRegion ? (tempPath ? '_clean_bilingual' : '_clean') : '_bilingual'
     const outPath  = await window.api.saveTextFile({
-      defaultPath: `${baseName}_bilingual.mp4`, data: ''
+      defaultPath: `${baseName}${suffix}.mp4`, data: ''
     })
     if (!outPath) { setStatus('已取消'); return }
 
-    setStatus('正在导出视频，可能耗时较长…')
+    setStatus(removeRegion ? '正在去除原片字幕并导出，耗时较长…' : '正在导出视频，可能耗时较长…')
     const r = await window.api.exportVideo({
       inputPath: state.videoPath,
       subtitlePath: tempPath,
-      outputPath: outPath
+      outputPath: outPath,
+      removeRegion
     })
     if (r && r.success) setStatus('视频导出成功：' + outPath)
     else if (r && r.error === 'ffmpeg_not_found') setStatus('需要安装 ffmpeg')
     else setStatus('视频导出失败：' + (r && r.error || '未知错误'))
+  })
+
+  // ---------- 商业级去字幕（GPU·STTN） ----------
+  if (removeHardSubBtn) removeHardSubBtn.addEventListener('click', async () => {
+    if (!state.videoPath) { setStatus('请先打开视频'); return }
+    // 必须先开启「去原片字幕」并把遮罩框对准字幕条，以此确定去除区域
+    if (!state.deSub) {
+      deSubChk.checked = true
+      showMask(true)
+      setStatus('请先拖动蓝框对准原片字幕条，再点「去字幕(GPU)」')
+      return
+    }
+    const region = maskPixelRegion()
+    if (!region) { setStatus('无法确定字幕区域，请重试'); return }
+
+    const baseName = state.videoPath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '')
+    const outPath = await window.api.saveTextFile({ defaultPath: `${baseName}_nosub.mp4`, data: '' })
+    if (!outPath) { setStatus('已取消'); return }
+
+    removeHardSubBtn.disabled = true
+    const off = window.api.onDesubProgress(({ done, total }) => {
+      const pct = total ? Math.floor(done * 100 / total) : 0
+      setStatus(`GPU 去字幕中… ${done}/${total} (${pct}%)`)
+    })
+    setStatus('GPU 去字幕中…（首次会自动下载约 66MB 模型）')
+    try {
+      const r = await window.api.removeHardSubs({
+        inputPath: state.videoPath,
+        outputPath: outPath,
+        region,
+        maskMode: 'auto',
+        device: 'cuda'
+      })
+      if (r && r.success) {
+        setStatus('去字幕完成：' + outPath + '（已载入，可叠加实时翻译）')
+        deSubChk.checked = false; showMask(false)   // 干净视频无需再遮挡
+        loadVideoFromPath(outPath)
+      } else if (r && r.error === 'no_python') {
+        setStatus('未检测到可用的 Python（需 torch + opencv）')
+      } else {
+        const detail = (r && r.details ? String(r.details).split(/\r?\n/).filter(Boolean).pop() : '') || ''
+        const msg = (r && r.error) ? String(r.error).replace(/^ERR:\s*/, '') : '未知错误'
+        console.error('[desub] 失败详情:', r && r.details)
+        setStatus('去字幕失败：' + msg + (detail && detail !== msg ? ' · ' + detail.slice(0, 160) : ''))
+      }
+    } finally {
+      if (typeof off === 'function') off()
+      removeHardSubBtn.disabled = false
+    }
   })
 
   // ---------- 控件事件 ----------
@@ -432,7 +600,13 @@
   rawModeChk.addEventListener('change', () => {
     if (rawModeChk.checked) applyRawMode()
     else applyFitMode()
+    positionMask()
   })
+  if (deSubChk) deSubChk.addEventListener('change', () => {
+    showMask(deSubChk.checked)
+    setStatus(deSubChk.checked ? '已开启去原片字幕：拖动遮罩对准原片字幕条' : '')
+  })
+  initMaskInteractions()
   displayLangSel.addEventListener('change', async () => {
     const mode = displayLangSel.value
     renderOverlay()

@@ -9,6 +9,13 @@ import argparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
+# 共享术语表（专有名词固定译法 / 误译修正）；缺失时优雅降级
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import term_utils
+except Exception:  # noqa: BLE001
+    term_utils = None
+
 # 设置模型缓存目录，避免占用C盘空间
 # 可以通过环境变量HF_HOME自定义模型存储位置
 model_cache_dir = os.environ.get("HF_HOME")
@@ -474,6 +481,21 @@ def process(items: List[dict], target: str) -> List[dict]:
                             continue
             except Exception:
                 # 如果所有翻译尝试都失败，保持原文
+                continue
+
+    # 术语表后处理：整句强制译法优先，其次对模型输出做误译修正替换。
+    # 显著改善「专有名词/固定译法」这类模型反复译错的情况。
+    if term_utils:
+        for idx, it in enumerate(items):
+            orig = it.get("text", "") or ""
+            try:
+                forced = term_utils.forced_translation(orig, tgt)
+                if forced is not None:
+                    out_items[idx]["text"] = safe_text(forced)
+                else:
+                    fixed = term_utils.apply_replacements(out_items[idx].get("text", ""), tgt)
+                    out_items[idx]["text"] = safe_text(fixed)
+            except Exception:  # noqa: BLE001 - 术语表问题不应影响翻译结果
                 continue
     return out_items
 

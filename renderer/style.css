@@ -54,6 +54,45 @@ html, body {
 #video.fit    { width: 100%; height: auto; max-height: calc(100vh - 60px); }
 #video.raw    { width: auto; height: auto; }
 
+/* 去原片硬字幕遮罩：模糊 + 压暗，盖住原片烧录的字幕条 */
+#subMask {
+  position: absolute;
+  display: none;
+  z-index: 8;                 /* 在视频之上、翻译字幕(#overlay z=10)之下 */
+  border: 1px dashed rgba(80, 170, 255, 0.7);
+  box-sizing: border-box;
+  /* 模糊并压暗下方视频区域，让原片硬字幕变成看不清的虚化 */
+  backdrop-filter: blur(10px) brightness(0.55);
+  -webkit-backdrop-filter: blur(10px) brightness(0.55);
+  background: rgba(0, 0, 0, 0.12);
+  cursor: move;
+}
+#subMask.editing { border-color: rgba(80, 170, 255, 0.95); }
+/* 调整时无需虚边框/手柄时隐藏提示边框（仍保留以便拖动） */
+#subMask .mask-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 14px;
+  height: 14px;
+  background: rgba(80, 170, 255, 0.95);
+  border: 2px solid #fff;
+  border-radius: 3px;
+  cursor: nwse-resize;
+}
+#subMask .mask-hint {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  font-size: 11px;
+  color: #cfe6ff;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* 字幕叠加层 —— 永远在视频之上，pointer-events:none 避免遮挡播放控件 */
 #overlay {
   position: absolute;

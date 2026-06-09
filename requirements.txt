@@ -12,3 +12,7 @@ faster-whisper>=1.0
 sentencepiece>=0.1.99
 safetensors>=0.4
 huggingface_hub>=0.23
+# 商业级硬字幕去除（STTN 视频补全，GPU 推荐）需要：
+# Hardcoded-subtitle removal (STTN video inpainting, GPU recommended) needs:
+opencv-python>=4.8
+torchvision>=0.17
