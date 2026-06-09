@@ -1,0 +1,29 @@
+# 统一换行符，消除 LF/CRLF 警告 / normalize line endings, silence LF/CRLF warnings
+# 仓库内文本文件统一存为 LF；检出时由各平台决定。
+* text=auto
+
+# Windows 批处理脚本必须是 CRLF / Windows batch files require CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 源码 / 文本统一 LF / source & text use LF
+*.py   text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# 二进制文件，禁止换行符转换 / binary, never touch
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.mp4  binary
+*.bin  binary
+*.safetensors binary
+*.model binary
